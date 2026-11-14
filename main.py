@@ -83,10 +83,19 @@ def _interp(aq, h):
 
 
 def _baseline_rows(x, horizon):
+    # One sqrt per horizon step, reused by all five quantile levels.
     rows = []
     for h in range(1, horizon + 1):
-        root = math.sqrt(h)
-        rows.append([min(1.0, max(0.0, x + z * BASE_SIGMA * root)) for z in Z])
+        spread = BASE_SIGMA * math.sqrt(h)
+        row = []
+        for z in Z:
+            v = x + z * spread
+            if v < 0.0:
+                v = 0.0
+            elif v > 1.0:
+                v = 1.0
+            row.append(v)
+        rows.append(row)
     return rows
 
 
@@ -126,6 +135,28 @@ def _clean(prices):
     return out
 
 
+def _blend_rows(emp, base, weight):
+    """Blend empirical and baseline rows at one weight, then clamp each
+    row to [0, 1], force it non-decreasing across the quantile levels and
+    round to 6 decimals."""
+    rows = []
+    for emp_row, base_row in zip(emp, base):
+        row = []
+        prev = 0.0
+        for e, b in zip(emp_row, base_row):
+            v = weight * e + (1.0 - weight) * b
+            if v < 0.0:
+                v = 0.0
+            elif v > 1.0:
+                v = 1.0
+            if v < prev:
+                v = prev
+            prev = v
+            row.append(round(v, 6) + 0.0)
+        rows.append(row)
+    return rows
+
+
 def forecast_market(prices, horizon):
     """Five quantiles of the price at each minute 1..horizon after the last."""
     prices = _clean(prices)
@@ -161,22 +192,7 @@ def forecast_market(prices, horizon):
             weight = cap
         elif weight < 0.35:
             weight = 0.35
-        rows = []
-        for emp_row, base_row in zip(emp, base):
-            row = []
-            prev = 0.0
-            for e, b in zip(emp_row, base_row):
-                v = weight * e + (1.0 - weight) * b
-                if v < 0.0:
-                    v = 0.0
-                elif v > 1.0:
-                    v = 1.0
-                if v < prev:
-                    v = prev
-                prev = v
-                row.append(round(v, 6) + 0.0)
-            rows.append(row)
-        return rows
+        return _blend_rows(emp, base, weight)
     except Exception:
         return [[round(v, 6) + 0.0 for v in row] for row in base]
 
