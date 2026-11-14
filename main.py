@@ -107,17 +107,22 @@ def _empirical_rows(prices, horizon):
 
 
 def _clean(prices):
-    """Forward-fill any missing ticks so a sparse young market cannot crash
-    the run or poison the delta distribution with a None."""
+    """Forward-fill any missing or non-finite ticks so a sparse young
+    market cannot crash the run or poison the delta distribution."""
     out = []
     last = None
     for p in prices:
         if p is None:
             if last is not None:
                 out.append(last)
-        else:
-            last = float(p)
-            out.append(last)
+            continue
+        v = float(p)
+        if v != v or v in (float('inf'), float('-inf')):
+            if last is not None:
+                out.append(last)
+            continue
+        last = v
+        out.append(v)
     return out
 
 
@@ -148,8 +153,12 @@ def forecast_market(prices, horizon):
             mad10 = 0.0
         ratio = mad10 / BASE_MAD10 if mad10 > 0.0 else 0.0
         weight = 1.0 - 0.35 * ratio
-        if weight > 0.90:
-            weight = 0.90
+        # A very young market gives the empirical rows little to stand on:
+        # with under 240 minutes of window, cap the empirical weight lower
+        # so the baseline's steadier spread carries more of the forecast.
+        cap = 0.90 if len(window) >= 240 else 0.60
+        if weight > cap:
+            weight = cap
         elif weight < 0.35:
             weight = 0.35
         rows = []
@@ -184,8 +193,13 @@ def run(input_dir, output_dir):
         for market in case['markets']:
             forecasts.append({'id': market['id'],
                               'q': forecast_market(market['prices'], horizon)})
-        with open(os.path.join(output_dir, name[:-3] + '.out'), 'w', encoding='utf-8') as fh:
+        # Write to a temp name and rename, so a reader never sees a
+        # half-written forecast file.
+        out_path = os.path.join(output_dir, name[:-3] + '.out')
+        tmp_path = out_path + '.tmp'
+        with open(tmp_path, 'w', encoding='utf-8') as fh:
             json.dump({'forecasts': forecasts}, fh, separators=(',', ':'))
+        os.replace(tmp_path, out_path)
 
 
 def main():
