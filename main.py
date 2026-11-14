@@ -51,11 +51,15 @@ def _quantile(sorted_vals, tau):
     return sorted_vals[lo] * (1.0 - frac) + sorted_vals[hi] * frac
 
 
-def _anchor_quantiles(prices, horizon, stride=3):
+def _anchor_quantiles(prices, horizon):
     n = len(prices)
     if n <= horizon + 30:
         return None
-    deltas = sorted(prices[t] - prices[t - horizon] for t in range(horizon, n, stride))
+    # Short horizons are cheap to sample densely and their tails drive the
+    # first forecast rows; long horizons stride to keep the run fast.
+    stride = 1 if horizon <= 3 else 3
+    deltas = sorted(prices[t] - prices[t - horizon]
+                    for t in range(horizon, n, stride))
     return [_quantile(deltas, tau) for tau in TAUS]
 
 
@@ -102,8 +106,24 @@ def _empirical_rows(prices, horizon):
     return rows
 
 
+def _clean(prices):
+    """Forward-fill any missing ticks so a sparse young market cannot crash
+    the run or poison the delta distribution with a None."""
+    out = []
+    last = None
+    for p in prices:
+        if p is None:
+            if last is not None:
+                out.append(last)
+        else:
+            last = float(p)
+            out.append(last)
+    return out
+
+
 def forecast_market(prices, horizon):
     """Five quantiles of the price at each minute 1..horizon after the last."""
+    prices = _clean(prices)
     if not prices:
         # No price by the checkpoint: nothing to centre on. Flat rows at the
         # middle keep the case valid instead of crashing the whole run.
@@ -116,7 +136,13 @@ def forecast_market(prices, horizon):
         if emp is None:
             emp = base
         if len(window) > 60:
-            jumps = [abs(window[i] - window[i - 10]) for i in range(10, len(window), 10)]
+            # Temper is what the market is doing lately, not what it did
+            # half a day ago: once the window is long, measure the activity
+            # on its most recent 360 minutes only. For these young markets
+            # that keeps a settled market's launch spike from making it
+            # look hotter than it now is.
+            recent = window[-360:] if len(window) > 360 else window
+            jumps = [abs(recent[i] - recent[i - 10]) for i in range(10, len(recent), 10)]
             mad10 = sum(jumps) / len(jumps)
         else:
             mad10 = 0.0
